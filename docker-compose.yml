@@ -1,0 +1,588 @@
+# Docker Compose Configuration for Lighting Core v1.0.0
+# ======================================================
+#
+# COMPREHENSIVE MICROSERVICES ORCHESTRATION
+# ==========================================
+#
+# This docker-compose.yml file defines all services needed for the complete
+# Lighting Core platform including Bitcoin blockchain, database, cache, and
+# Lightning Network services.
+#
+# Quick Start Commands:
+# ====================
+#
+# Start all services:
+#   docker-compose up -d
+#
+# Stop all services:
+#   docker-compose down
+#
+# View live logs from all services:
+#   docker-compose logs -f
+#
+# View logs from specific service:
+#   docker-compose logs -f wallet
+#
+# Rebuild and restart a service:
+#   docker-compose up -d --build wallet
+#
+# Execute command in running container:
+#   docker-compose exec wallet bash
+#   docker-compose exec bitcoin bitcoin-cli -testnet getblockcount
+#
+# Remove all data (careful!):
+#   docker-compose down -v  (removes volumes with data)
+#
+# Service Architecture:
+# ====================
+#
+#   Client Applications
+#        ↓
+#   Lighting Core API
+#   (wallet-server.js)
+#        ↓
+#   ┌────┴────┬─────────┬──────────┐
+#   ↓         ↓         ↓          ↓
+# Bitcoin   PostgreSQL Redis    LND Lightning
+# Node      Database   Cache    Network
+#
+
+version: '3.8'
+
+services:
+
+  # ==================================================
+  # Bitcoin Node (TestNet)
+  # ==================================================
+  # 
+  # PURPOSE:
+  # ========
+  # The Bitcoin blockchain node synchronizes with the Bitcoin TestNet network,
+  # providing the following functions:
+  # - Maintains a complete copy of the Bitcoin TestNet blockchain
+  # - Validates all transactions and blocks
+  # - Provides RPC (Remote Procedure Call) interface for wallet operations
+  # - Broadcasts transactions to the network
+  # - Enables other services to query blockchain state
+  #
+  # WHY TESTNET?
+  # ============
+  # TestNet (Test Network) is a separate blockchain from MainNet:
+  # - Test coins have no real value
+  # - Perfect for development and testing
+  # - No risk of losing real money
+  # - Same consensus rules as MainNet
+  # - Easily reset if needed
+  #
+  # DATA PERSISTENCE:
+  # =================
+  # The blockchain data (~30GB for full TestNet) is stored in a Docker volume.
+  # Volumes survive container restarts and upgrades.
+  # Location: bitcoin-data volume mounted at /data inside container
+  #
+  # RPC INTERFACE:
+  # ==============
+  # Bitcoin Core exposes JSON-RPC interface on port 18332 (TestNet RPC port)
+  # Wallet servers connect to this to:
+  # - Send transactions: sendrawtransaction
+  # - Query transactions: gettransaction, getblock
+  # - Broadcast transactions: sendtoaddress
+  # - Get network info: getblockcount, getnetworkinfo
+  #
+  # SECURITY NOTE:
+  # ===============
+  # TestNet credentials (bitcoin/password) are hardcoded for development only.
+  # In production, use environment variables or secret management systems!
+  #
+  # STARTUP TIME:
+  # =============
+  # First run: 10-30 minutes to sync blockchain (~10GB of data)
+  # Subsequent runs: Quick startup, only need to catch up new blocks
+  # Full sync typically takes 30-60 minutes on modern hardware
+  #
+  bitcoin:
+    image: btcpayserver/bitcoin:24.0
+    container_name: lighting-bitcoin
+    command:
+      # Bitcoin daemon options
+      - -testnet              # Use TestNet instead of MainNet
+      - -server               # Enable JSON-RPC server for remote connections
+      - -rpcuser=bitcoin      # RPC username for authentication
+      - -rpcpassword=password # RPC password (CHANGE IN PRODUCTION!)
+      - -rpcbind=0.0.0.0     # Listen on all interfaces (needed for Docker)
+      - -rpcallowip=0.0.0.0/0 # Allow RPC connections from any IP
+    ports:
+      # TestNet RPC Port - Wallet services connect here to broadcast/query transactions
+      - "18332:18332"
+      # TestNet P2P Port - Bitcoin peers connect here for network consensus
+      - "18333:18333"
+    volumes:
+      # Persistent volume for blockchain data storage
+      # Keeps blockchain data even when container is removed
+      - bitcoin-data:/data
+    networks:
+      # Custom Docker network for inter-container communication
+      # Services communicate using container names as hostnames
+      - lighting-network
+    healthcheck:
+      # Periodic health check ensures Bitcoin node is responsive
+      # Docker uses this to determine if service is healthy
+      test: ["CMD", "bitcoin-cli", "-testnet", "-rpcuser=bitcoin", "-rpcpassword=password", "getblockcount"]
+      interval: 30s        # Check every 30 seconds
+      timeout: 10s         # Wait max 10 seconds for response
+      retries: 5           # Mark unhealthy after 5 failed checks
+      start_period: 20s    # Wait 20 seconds after startup before first check
+
+
+  # ==================================================
+  # PostgreSQL Database
+  # ==================================================
+  #
+  # PURPOSE:
+  # ========
+  # PostgreSQL is a powerful, open-source relational database system.
+  # It stores all persistent application data including:
+  # - User accounts and credentials
+  # - Wallet metadata and addresses
+  # - Transaction records
+  # - Lightning channel state
+  # - Session data
+  # - Application configuration
+  #
+  # WHY POSTGRESQL?
+  # ================
+  # - Open source with large community
+  # - ACID compliance ensures data consistency
+  # - JSON support for flexible schema
+  # - Built-in replication for high availability
+  # - Great performance and indexing
+  #
+  # DATA PERSISTENCE:
+  # =================
+  # Database files stored in postgres-data volume
+  # Persists across container restarts
+  # Automatic data durability and crash recovery
+  #
+  # CONNECTION:
+  # ============
+  # Other services connect using:
+  # postgresql://lightingcore:lightingcore_secure_password@postgres:5432/lighting_core
+  #
+  # Components:
+  # - lightingcore: Database username
+  # - lightingcore_secure_password: Password
+  # - postgres: Hostname (container name on network)
+  # - 5432: Default PostgreSQL port
+  # - lighting_core: Database name
+  #
+  # BACKUP STRATEGY:
+  # ================
+  # In production, implement regular pg_dump backups:
+  # docker-compose exec postgres pg_dump -U lightingcore lighting_core > backup.sql
+  #
+  postgres:
+    image: postgres:15-alpine
+    container_name: lighting-postgres
+    environment:
+      # Database initialization parameters
+      # Only used on first container creation
+      POSTGRES_DB: lighting_core        # Initial database name
+      POSTGRES_USER: lightingcore       # Admin user (NOT postgres user)
+      POSTGRES_PASSWORD: lightingcore_secure_password  # Change this!
+    ports:
+      # PostgreSQL port for external tools (pgAdmin, etc.)
+      # In production, don't expose this publicly!
+      - "5432:5432"
+    volumes:
+      # Database files persistence
+      # PostgreSQL stores all data here
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - lighting-network
+    healthcheck:
+      # pg_isready checks if database is accepting connections
+      test: ["CMD-SHELL", "pg_isready -U lightingcore"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ==================================================
+  # Redis Cache
+  # ==================================================
+  #
+  # PURPOSE:
+  # ========
+  # Redis is an in-memory data store used for:
+  # - Session caching (faster than database queries)
+  # - Real-time data caching
+  # - Message queueing
+  # - Rate limiting counters
+  # - Temporary computation results
+  #
+  # PERFORMANCE BENEFIT:
+  # ====================
+  # Redis is ~100x faster than PostgreSQL for reads
+  # Typical response times:
+  # - Database query: 5-50ms
+  # - Redis lookup: <1ms
+  #
+  # PERSISTENCE:
+  # =============
+  # Despite being in-memory, Redis can persist to disk:
+  # - RDB snapshots: Full dataset dumps
+  # - AOF (Append-Only File): Transaction log
+  # We use AOF (--appendonly yes) for durability
+  #
+  # DATA EXPIRATION:
+  # ================
+  # Cache entries have TTL (Time To Live)
+  # Automatically deleted when expired
+  # Prevents cache from growing unbounded
+  #
+  # USE CASES IN WALLET:
+  # ====================
+  # - Cache user sessions (avoid database lookup on each request)
+  # - Cache wallet balances (reduce database queries)
+  # - Rate limiting (track requests per IP)
+  # - Transaction pending states
+  #
+  redis:
+    image: redis:7-alpine
+    container_name: lighting-redis
+    command: redis-server --appendonly yes  # Enable AOF persistence
+    ports:
+      # Redis port for external monitoring tools
+      - "6379:6379"
+    volumes:
+      # Append-only file for persistence
+      # Redis writes every command here for durability
+      - redis-data:/data
+    networks:
+      - lighting-network
+    healthcheck:
+      # PING command returns PONG if Redis is healthy
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  # ==================================================
+  # Lightning Network Daemon (LND)
+  # ==================================================
+  #
+  # PURPOSE:
+  # ========
+  # LND is a reference implementation of the Lightning Network protocol.
+  # It enables:
+  # - Creation of payment channels with peers
+  # - Off-chain Bitcoin transactions (instant, low-fee)
+  # - Multi-hop routing through Lightning network
+  # - Channel state management and settlement
+  #
+  # WHAT IS LIGHTNING NETWORK?
+  # ============================
+  # Lightning enables instant Bitcoin payments:
+  # 1. Two users open a channel by locking Bitcoin on-chain
+  # 2. They can transact instantly off-chain many times
+  # 3. Only final settlement touches blockchain
+  # 
+  # Benefits:
+  # - Instant confirmation (~milliseconds vs 10 minutes)
+  # - Minimal fees (fraction of a cent vs 1-50 cents)
+  # - Micropayments become practical
+  # - Blockchain doesn't need to process every transaction
+  #
+  # CONNECTION TO BITCOIN:
+  # ======================
+  # LND depends on Bitcoin node for:
+  # - Channel funding (on-chain transactions)
+  # - Final settlement (on-chain transaction)
+  # - Block notifications (on-chain confirmations)
+  #
+  # Uses Bitcoin's JSON-RPC and ZMQ for communication
+  # ZMQ (Zero Message Queue) for real-time block notifications
+  #
+  # PORTS:
+  # =======
+  # - 10009: gRPC API (Go Remote Procedure Call)
+  #   Advanced protocol, high performance
+  # - 8080: REST API (HTTP/REST)
+  #   Easy to use, human-friendly
+  # - 9735: P2P Port (Lightning network connections)
+  #   Other Lightning nodes connect here
+  #
+  # STARTUP:
+  # =========
+  # First run: ~5 minutes
+  # - Creates wallet
+  # - Generates keys
+  # - Connects to Bitcoin network
+  # - Syncs blockchain tip
+  # Then ready for channel operations
+  #
+  # CHANNEL CREATION PROCESS:
+  # ==========================
+  # 1. Get other node's public key
+  # 2. Initiate channel: lncli openchannel <pubkey> <amount>
+  # 3. LND broadcasts funding transaction to Bitcoin
+  # 4. Wait for 3 confirmations (30 mins typical)
+  # 5. Channel is active and ready for payments
+  #
+  lnd:
+    image: lightningnetwork/lnd:latest
+    container_name: lighting-lnd
+    environment:
+      # Network configuration - must match Bitcoin node
+      NETWORK: testnet
+      CHAIN: bitcoin
+      BACKEND: bitcoind  # Use bitcoind backend (not btcd)
+      BITCOIND_RPCHOST: bitcoin  # Bitcoin container hostname
+      BITCOIND_RPCUSER: bitcoin
+      BITCOIND_RPCPASS: password
+    ports:
+      - "10009:10009"  # gRPC API
+      - "8080:8080"    # REST API
+      - "9735:9735"    # P2P
+    volumes:
+      # LND configuration and wallet data
+      - lnd-data:/root/.lnd
+    networks:
+      - lighting-network
+    depends_on:
+      # LND requires Bitcoin to be running first
+      - bitcoin
+    command:
+      # LND startup options
+      - lnd
+      - --lnddir=/root/.lnd
+      - --bitcoin.active           # Enable Bitcoin chain
+      - --bitcoin.testnet          # Use TestNet
+      - --bitcoin.node=bitcoind    # Use bitcoind backend
+      - --bitcoind.rpchost=bitcoin:18332  # Connect to Bitcoin RPC
+      - --bitcoind.rpcuser=bitcoin
+      - --bitcoind.rpcpass=password
+      - --bitcoind.zmqpubrawblock=tcp://bitcoin:28332  # Block notifications
+      - --bitcoind.zmqpubrawtx=tcp://bitcoin:28333     # Tx notifications
+      - --restlisten=0.0.0.0:8080  # Listen on all interfaces for REST API
+
+
+  # ==================================================
+  # Lighting Core Wallet Services
+  # ==================================================
+  #
+  # PURPOSE:
+  # ========
+  # This is the main application service running:
+  # - Python wallet backend (wallet.py)
+  # - Node.js Express API server (wallet-server.js)
+  # - Both servers running concurrently in single container
+  #
+  # DEPLOYMENT ARCHITECTURE:
+  # ========================
+  # In production, you might split into separate containers:
+  # 1. wallet-python service (Flask on 5000)
+  # 2. wallet-nodejs service (Express on 3000)
+  # This enables:
+  # - Independent scaling
+  # - Better resource isolation
+  # - Separate restart policies
+  # - Language-specific optimizations
+  #
+  # PORTS EXPOSED:
+  # ===============
+  # - 5000: Python Flask API
+  # - 3000: Node.js Express API (primary)
+  #
+  # DEPENDENCIES:
+  # ==============
+  # Before wallet-core starts, all these must be healthy:
+  # - bitcoin: Blockchain node
+  # - postgres: Database
+  # - redis: Cache
+  #
+  # This prevents startup errors when database not ready
+  #
+  # ENVIRONMENT VARIABLES:
+  # ======================
+  # Passed to container, override defaults in .env
+  # Includes:
+  # - Database connection string
+  # - Bitcoin node URL
+  # - Lightning node URL
+  # - Redis URL
+  # - Debug flags
+  #
+  # VOLUMES:
+  # =========
+  # - ./ (current directory): Source code
+  #   Mounted for development (code changes appear immediately)
+  #   In production, use COPY only (no volume mount)
+  # - wallet-data: Persistent wallet files
+  #
+  lighting-core:
+    # Build from local Dockerfile instead of pulling image
+    # Dockerfile contains multi-stage build for Python + Node.js
+    build:
+      context: .           # Build context (current directory)
+      dockerfile: Dockerfile
+    container_name: lighting-core-wallet
+    environment:
+      # =====================
+      # Application Settings
+      # =====================
+      ENVIRONMENT: development
+      DEBUG: "true"
+      PORT: 3000
+      
+      # =====================
+      # Database Connection
+      # =====================
+      # Full PostgreSQL connection string
+      # Format: postgresql://user:password@host:port/database
+      DATABASE_URL: postgresql://lightingcore:lightingcore_secure_password@postgres:5432/lighting_core
+      
+      # =====================
+      # Bitcoin Configuration
+      # =====================
+      # Connect to Bitcoin TestNet node
+      BITCOIN_NODE_URL: http://bitcoin:18332
+      BITCOIN_RPC_USER: bitcoin
+      BITCOIN_RPC_PASSWORD: password
+      BITCOIN_NETWORK: testnet
+      
+      # =====================
+      # Lightning Configuration
+      # =====================
+      # Connect to LND REST API for Lightning operations
+      LN_NODE_URL: http://lnd:8080
+      
+      # =====================
+      # Cache Configuration
+      # =====================
+      # Connect to Redis for session and data caching
+      REDIS_URL: redis://redis:6379
+    ports:
+      - "5000:5000"  # Python Flask API server
+      - "3000:3000"  # Node.js Express API server (primary)
+    depends_on:
+      # Ensure all dependencies are healthy before starting
+      bitcoin:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      # Mount source code for development
+      # Changes to files appear immediately without rebuild
+      # REMOVE this in production! Only COPY needed.
+      - ./:/app
+      
+      # Persistent wallet data
+      - wallet-data:/app/wallets
+    networks:
+      - lighting-network
+    healthcheck:
+      # Verify wallet server is responding
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+
+# ==================================================
+# Networks Configuration
+# ==================================================
+#
+# Networks allow containers to communicate by container name
+# Instead of using IP addresses (which change each restart)
+# Services can reference each other by name:
+#   - bitcoin container can be reached at "bitcoin:18332"
+#   - postgres container can be reached at "postgres:5432"
+#   - etc.
+#
+# Isolated network improves security:
+# - External services can't access internal services
+# - Only exposed ports are accessible from host
+#
+networks:
+  lighting-network:
+    driver: bridge  # Standard bridge network for communication
+
+
+# ==================================================
+# Volumes Configuration
+# ==================================================
+#
+# Named volumes provide persistent storage that survives:
+# - Container restarts
+# - Container removal
+# - Compose file changes
+#
+# Storage locations:
+# - Linux: /var/lib/docker/volumes/
+# - Mac/Windows: Managed by Docker Desktop
+#
+# Volumes vs Bind Mounts:
+# - Volumes: Managed by Docker, better performance
+# - Bind Mounts: Direct filesystem access, easier for development
+# We use volumes for data, bind mounts for source code (in dev)
+#
+# Backup volumes:
+# docker run --rm -v source-volume:/data -v backup:/backup \
+#   ubuntu tar czf /backup/backup.tar.gz -C /data .
+
+volumes:
+  # Bitcoin blockchain data (~10-30GB)
+  # Persists blockchain copy even if container removed
+  bitcoin-data:
+  
+  # PostgreSQL database files
+  # Contains all wallet, user, and transaction data
+  postgres-data:
+  
+  # Redis persistence file (AOF)
+  # Contains transaction log for durability
+  redis-data:
+  
+  # LND wallet and channel state
+  # Critical: Losing this means losing channel access
+  # ALWAYS BACKUP THIS VOLUME!
+  lnd-data:
+  
+  # Wallet data files (private keys, addresses, etc.)
+  # CRITICAL: Losing this means losing access to wallets
+  # MUST BACKUP REGULARLY!
+  wallet-data:
+
+
+# ==================================================
+# Troubleshooting Guide
+# ==================================================
+#
+# Service won't start?
+#   docker-compose logs service-name
+#
+# Rebuild service (after code changes):
+#   docker-compose up -d --build service-name
+#
+# Reset everything (WARNING: deletes all data):
+#   docker-compose down -v
+#   docker-compose up -d
+#
+# Database errors?
+#   docker-compose exec postgres psql -U lightingcore -d lighting_core
+#
+# Bitcoin not syncing?
+#   docker-compose exec bitcoin bitcoin-cli -testnet getblockcount
+#
+# Check service health:
+#   docker-compose ps  (shows health status)
+#
+# View resource usage:
+#   docker stats
+#
+# Execute command in container:
+#   docker-compose exec service-name bash
