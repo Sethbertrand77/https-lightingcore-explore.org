@@ -1,0 +1,35 @@
+# Bitcoin and Blockchain Libraries
+bitcoinlib==0.6.14  # Bitcoin library for key generation and address management
+web3==6.11.3        # Web3 library for blockchain interactions (Ethereum interop)
+
+# Cryptography
+cryptography==41.0.7  # Cryptographic operations
+ecdsa==0.18.0         # ECDSA implementation for Bitcoin signatures
+hashlib             # Built-in hash library
+
+# API and Server
+Flask==3.0.0        # Web framework for REST API
+Flask-RESTful==0.3.10  # REST API extension for Flask
+Flask-CORS==4.0.0   # CORS support
+gunicorn==21.2.0    # Production WSGI server
+
+# Database
+SQLAlchemy==2.0.23  # ORM for database operations
+psycopg2-binary==2.9.9  # PostgreSQL adapter
+
+# Utilities
+python-dotenv==1.0.0  # Environment variable management
+requests==2.31.0    # HTTP library
+pydantic==2.5.0     # Data validation using Python type annotations
+
+# Testing
+pytest==7.4.3       # Testing framework
+pytest-cov==4.1.0   # Test coverage
+
+# Logging and Monitoring
+python-json-logger==2.0.7  # JSON logging
+
+# Development
+black==23.12.0      # Code formatter
+flake8==6.1.0       # Linter
+mypy==1.7.1         # Static type checker
